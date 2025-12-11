@@ -1,0 +1,569 @@
+// --- 导入依赖 ---
+import * as THREE from "https://esm.sh/three@0.160.0";
+import { FontLoader } from "https://esm.sh/three@0.160.0/examples/jsm/loaders/FontLoader.js";
+import { TextGeometry } from "https://esm.sh/three@0.160.0/examples/jsm/geometries/TextGeometry.js";
+import { MeshSurfaceSampler } from "https://esm.sh/three@0.160.0/examples/jsm/math/MeshSurfaceSampler.js";
+
+// MediaPipe 导入改回使用 CDN
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/vision_bundle.js"; 
+
+
+// --- 配置与全局变量 ---
+const CONFIG = {
+  particleCount: 10000, 
+  particleSize: 0.12, 
+  CONFESSION_THRESHOLD_MS: 100, // ⚠️ 关键修改 1: 将延迟从 300ms 缩短到 100ms
+  MAX_ROTATION_Y: Math.PI / 4,        
+  ROTATION_SMOOTHING: 0.05,           
+  ASPECT_RATIO_THRESHOLD: 1.2,
+  HEART_PARTICLE_START: 2000, 
+  HEART_PARTICLE_END: 8000,   
+  HEART_PULSE_SPEED: 5.0, 
+  HEART_PULSE_MIN: 0.9,   
+  HEART_PULSE_MAX: 1.1,   
+  colors: {
+    text: 0x00ffff,
+    love: 0xff69b4,
+    balloon: [0xff4d4d, 0x4dff4d, 0x4d4dff, 0xffff4d, 0xff4dff]
+  }
+};
+
+const LAYOUT_CONFIG = {
+    HORIZONTAL: {
+        I: { x: -10.5, y: 0 }, 
+        H: { x: 0, y: 0 },
+        U: { x: 10.5, y: 0 } 
+    },
+    VERTICAL: {
+        I: { x: 0, y: 9.5 }, 
+        H: { x: 0, y: 0 },
+        U: { x: 0, y: -9.5 } 
+    }
+};
+
+let scene, camera, renderer, particles, particleGeo;
+let targetPositions = new Float32Array(CONFIG.particleCount * 3);
+let originalHeartPositions = null; 
+let balloons = []; 
+let handLandmarker = undefined;
+let video = null;
+let lastGesture = -1;
+let loadedFont = null;
+let isConfessionMode = false;
+let cameraInitialized = false; 
+
+let targetRotationY = 0;
+let currentRotationY = 0;
+let confessionTimer = null;
+let lastDetectionTime = 0;
+let currentScaleFactor = 1.0; 
+
+
+function getLayoutMode() {
+    return window.innerWidth / window.innerHeight >= CONFIG.ASPECT_RATIO_THRESHOLD ? 'HORIZONTAL' : 'VERTICAL';
+}
+
+function isMobileView() {
+    return window.innerWidth / window.innerHeight < CONFIG.ASPECT_RATIO_THRESHOLD;
+}
+
+// =========================================================
+// === 🚀 启动入口 ===
+// =========================================================
+async function init() {
+    createUIBindings();
+    initThree();
+    await initMediaPipe();
+    await loadFont();
+    animate();
+
+    if (isMobileView()) {
+        console.log("检测到窄屏设备，使用 Mobile 启动流程。");
+        initMobile();
+    } else {
+        console.log("检测到宽屏设备，使用 Desktop 启动流程。");
+        initDesktop();
+    }
+}
+
+// --- 💻/📱 设备启动流程 ---
+
+function initDesktop() {
+    setupCamera();
+}
+
+function initMobile() {
+    const overlay = document.getElementById('start-overlay');
+    const startBtn = document.getElementById('start-btn');
+    
+    if (overlay) overlay.style.display = 'flex'; 
+    
+    if (startBtn) {
+        startBtn.onclick = () => {
+            if (!cameraInitialized) {
+                setupCamera();
+            }
+        };
+    }
+}
+
+function createUIBindings() {
+    video = document.getElementById('input-video');
+
+    const fsBtn = document.getElementById('fs-btn');
+    if (fsBtn) {
+        fsBtn.onclick = () => {
+            if (!document.fullscreenElement) document.body.requestFullscreen();
+            else document.exitFullscreen();
+        };
+    }
+}
+
+// --- 2. Three.js 场景搭建 ---
+function initThree() {
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x000000, 0.02);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    
+    function updateCameraZ() {
+        const aspectRatio = window.innerWidth / window.innerHeight;
+        camera.position.z = 20 + Math.max(0, 1 / aspectRatio - 0.5) * 10;
+    }
+    updateCameraZ();
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    const pointLight = new THREE.PointLight(0xffffff, 0.8);
+    pointLight.position.set(10, 10, 10);
+    scene.add(pointLight);
+
+    particleGeo = new THREE.BufferGeometry();
+    const positions = new Float32Array(CONFIG.particleCount * 3);
+    for (let i = 0; i < CONFIG.particleCount * 3; i++) {
+        positions[i] = (Math.random() - 0.5) * 60;
+    }
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    
+    const particleMat = new THREE.PointsMaterial({
+        color: CONFIG.colors.text,
+        size: CONFIG.particleSize,
+        transparent: true,
+        opacity: 0.9,
+        blending: THREE.AdditiveBlending,
+        sizeAttenuation: true
+    });
+
+    particles = new THREE.Points(particleGeo, particleMat);
+    scene.add(particles); 
+    
+    updateTargetPositionsToRandom();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        updateCameraZ(); 
+        
+        if (isConfessionMode) {
+            triggerConfession(true); 
+        }
+    });
+}
+
+// --- 3. 资源加载 ---
+async function loadFont() {
+  const loader = new FontLoader();
+  return new Promise(resolve => {
+    // 字体文件仍使用 CDN，您可以考虑将其也本地化
+    loader.load('https://esm.sh/three@0.160.0/examples/fonts/helvetiker_bold.typeface.json', (font) => {
+      loadedFont = font;
+      resolve();
+    });
+  });
+}
+
+// --- 4. MediaPipe 初始化 (CDN 故障转移机制) ---
+async function initMediaPipe() {
+  
+  const CDN_WASM_PATH = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm";
+  const LOCAL_PATH = "./models";
+  
+  let filesetResolverPath = CDN_WASM_PATH;
+  // MediaPipe 模型 GCS 原始地址
+  let modelAssetPath = `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`;
+
+  // --- 探测 CDN 是否可用 ---
+  try {
+    // 尝试通过 Fetch API 访问 WASM 路径下的小文件来判断连通性
+    const response = await fetch(`${CDN_WASM_PATH}/vision_wasm_internal.js`);
+    if (!response.ok) {
+        // 如果状态码不是 2xx, 视为失败
+        throw new Error("CDN status not OK or file not found.");
+    }
+    console.log("✅ MediaPipe CDN 连通性良好，使用 CDN 路径。");
+    
+  } catch (error) {
+    // 如果 Fetch 失败（网络错误、CORS 或 404/500 等）
+    console.warn("❌ MediaPipe CDN 访问失败或被阻止，切换到本地路径！", error);
+    filesetResolverPath = LOCAL_PATH;
+    modelAssetPath = `${LOCAL_PATH}/hand_landmarker.task`;
+  }
+  
+  // --- 使用确定的路径初始化 ---
+  const vision = await FilesetResolver.forVisionTasks(filesetResolverPath); 
+  
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: modelAssetPath, // 使用确定的模型路径
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 1
+  });
+  console.log("MediaPipe 模型已初始化，等待摄像头启动...");
+}
+
+// --- 5. 摄像头设置 ---
+function setupCamera() {
+  const overlay = document.getElementById('start-overlay');
+  if (overlay) overlay.style.display = 'none';
+  
+  if (!video) {
+    console.error("Video element not found.");
+    return;
+  }
+  
+  navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+    video.srcObject = stream;
+    video.addEventListener("loadeddata", predictWebcam);
+    cameraInitialized = true;
+  }).catch(err => {
+     console.error("无法访问摄像头: ", err);
+     
+     let errorMessage = "摄像头权限获取失败。";
+     
+     if (err.name === "NotAllowedError" || err.name === "SecurityError") {
+         errorMessage += "\n\n请检查您的浏览器权限设置，并确认您已点击了“开始”按钮来授予权限。";
+     } else if (err.name === "NotFoundError") {
+         errorMessage += "\n\n未找到可用的摄像头设备。";
+     } else {
+         errorMessage += `\n\n出现未知错误 (${err.name})，请检查 Console。`;
+     }
+
+     alert(errorMessage);
+  });
+}
+
+// --- MediaPipe 预测循环 (只处理手势和旋转) ---
+async function predictWebcam() {
+  if (handLandmarker && video.readyState >= 2) { 
+    const now = performance.now();
+    const results = await handLandmarker.detectForVideo(video, now);
+    lastDetectionTime = now;
+    
+    if (results.landmarks.length > 0) {
+      const landmarks = results.landmarks[0];
+      const fingerCount = countFingers(landmarks);
+      handleGesture(fingerCount);
+      
+      const wristX = landmarks[0].x; 
+      targetRotationY = (0.5 - wristX) * 2 * CONFIG.MAX_ROTATION_Y;
+      
+    } else {
+      handleGesture(-1); 
+      targetRotationY = 0; 
+    }
+  }
+  requestAnimationFrame(predictWebcam);
+}
+
+// --- 手指计数 (判断手势) ---
+function countFingers(landmarks) {
+  const tips = [4, 8, 12, 16, 20];
+  const pips = [3, 6, 10, 14, 18];
+  let count = 0;
+  
+  const thumbTip = landmarks[4];
+  const thumbIp = landmarks[3];
+  const pinkyMcp = landmarks[17];
+  
+  const distTip = Math.hypot(thumbTip.x - pinkyMcp.x, thumbTip.y - pinkyMcp.y);
+  const distIp = Math.hypot(thumbIp.x - pinkyMcp.x, thumbIp.y - pinkyMcp.y);
+  
+  if (distTip > distIp * 1.1) count++;
+
+  for (let i = 1; i < 5; i++) {
+    if (landmarks[tips[i]].y < landmarks[pips[i]].y) count++; 
+  }
+  return count;
+}
+
+// --- 交互逻辑核心 (已修改) ---
+function handleGesture(count) {
+  
+  // 告白模式防抖动逻辑
+  if (count === 5) {
+      if (!isConfessionMode) { // 如果不是告白模式，才检查和计时
+          if (!confessionTimer) {
+              confessionTimer = setTimeout(() => {
+                  if (lastGesture === 5) {
+                       triggerConfession(false); 
+                       // ⚠️ 关键修改 2: 成功触发告白模式后，立即设置 lastGesture
+                       lastGesture = 5; 
+                  }
+                  confessionTimer = null;
+              }, CONFIG.CONFESSION_THRESHOLD_MS);
+          }
+      }
+      if (isConfessionMode) return; 
+  } else {
+      // 如果不是 5 指，取消计时器
+      if (confessionTimer) {
+          clearTimeout(confessionTimer);
+          confessionTimer = null;
+      }
+      // 如果处于告白模式，但手势不是 5 也不是 0，则保持当前状态，但重置缩放
+      if (isConfessionMode && count !== 0) {
+         currentScaleFactor = 1.0; 
+         return;
+      }
+  }
+  
+  // 处理其他手势和手势丢失
+  if (count === lastGesture) return;
+  
+  if (count !== -1) {
+    lastGesture = count;
+  } else {
+    // 只有当 count=-1 且 lastGesture != -1 时才重置场景
+    if (lastGesture !== -1) {
+        resetScene();
+        lastGesture = -1; // 确保下次检测到手势时能正确更新
+    }
+    return;
+  }
+  
+  if (count === 0) {
+    resetScene();
+  } else if (count >= 1 && count <= 3) {
+    isConfessionMode = false;
+    clearBalloons();
+    particles.material.color.setHex(CONFIG.colors.text);
+    currentScaleFactor = 1.0; 
+    sampleTextToParticles(count.toString(), 0, CONFIG.particleCount, 0, 0); 
+  } 
+}
+
+function resetScene() {
+  isConfessionMode = false;
+  clearBalloons();
+  particles.material.color.setHex(CONFIG.colors.text);
+  updateTargetPositionsToRandom();
+  currentScaleFactor = 1.0;
+  originalHeartPositions = null;
+  targetRotationY = 0; 
+}
+
+function triggerConfession(forceRepositioning) {
+  if (isConfessionMode && !forceRepositioning) return;
+  
+  isConfessionMode = true;
+  particles.material.color.setHex(CONFIG.colors.love);
+  
+  const mode = getLayoutMode();
+  const config = LAYOUT_CONFIG[mode];
+  
+  let currentIndex = 0;
+  
+  // I 
+  currentIndex = sampleTextToParticles("I", currentIndex, CONFIG.HEART_PARTICLE_START, config.I.x, config.I.y); 
+  
+  // Heart 
+  currentIndex = generateHeartShape(currentIndex, CONFIG.HEART_PARTICLE_END - CONFIG.HEART_PARTICLE_START, config.H.y); 
+  
+  // U 
+  sampleTextToParticles("U", currentIndex, CONFIG.particleCount - currentIndex, config.U.x, config.U.y); 
+  
+  if (!forceRepositioning) {
+    spawnBalloonsAndFlowers();
+  }
+  
+  saveOriginalHeartPositions();
+}
+
+function saveOriginalHeartPositions() {
+    const start = CONFIG.HEART_PARTICLE_START * 3;
+    const end = CONFIG.HEART_PARTICLE_END * 3;
+    
+    // 仅保存心形部分的 targetPositions
+    originalHeartPositions = targetPositions.slice(start, end);
+}
+
+function sampleTextToParticles(text, startIndex, count, xOffset, yOffset) {
+  if (!loadedFont || count <= 0) return startIndex;
+
+  const geometry = new TextGeometry(text, {
+    font: loadedFont,
+    size: 5,
+    height: 0.2,
+    curveSegments: 24,
+    bevelEnabled: true,
+    bevelThickness: 0.1,
+    bevelSize: 0.05,
+    bevelSegments: 4
+  });
+
+  geometry.center();
+
+  const material = new THREE.MeshBasicMaterial();
+  const mesh = new THREE.Mesh(geometry, material);
+  const sampler = new MeshSurfaceSampler(mesh).build(); 
+  const tempPosition = new THREE.Vector3();
+
+  for (let i = 0; i < count; i++) {
+    const idx = (startIndex + i) * 3;
+    sampler.sample(tempPosition);
+    
+    targetPositions[idx] = tempPosition.x + xOffset;
+    targetPositions[idx + 1] = tempPosition.y + yOffset; 
+    targetPositions[idx + 2] = tempPosition.z;
+  }
+  
+  geometry.dispose();
+  material.dispose();
+  
+  return startIndex + count;
+}
+
+function generateHeartShape(startIndex, count, yOffset) {
+  const scale = 0.3; 
+  
+  for (let i = 0; i < count; i++) {
+     const idx = (startIndex + i) * 3;
+     
+     let t = Math.random() * Math.PI * 2;
+     let r = Math.sqrt(Math.random()); 
+     
+     let x = 16 * Math.pow(Math.sin(t), 3);
+     let y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+     
+     x = x * scale * r;
+     y = y * scale * r;
+
+     targetPositions[idx] = x;
+     targetPositions[idx + 1] = y + 1 + yOffset; 
+     targetPositions[idx + 2] = (Math.random() - 0.5) * 2; 
+  }
+  return startIndex + count;
+}
+
+function updateTargetPositionsToRandom() {
+  for (let i = 0; i < CONFIG.particleCount * 3; i++) {
+    targetPositions[i] = (Math.random() - 0.5) * 80;
+  }
+}
+
+function spawnBalloonsAndFlowers() {
+  for (let i = 0; i < 60; i++) {
+    const isBalloon = Math.random() > 0.4;
+    const color = CONFIG.colors.balloon[Math.floor(Math.random() * CONFIG.colors.balloon.length)];
+    const obj = new THREE.Group();
+    
+    if (isBalloon) {
+      const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.6, 32, 32), new THREE.MeshPhongMaterial({ color: color, shininess: 120 }));
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -0.6, 0), new THREE.Vector3(0, -2.5, 0)]);
+      const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xaaaaaa }));
+      obj.add(sphere);
+      obj.add(line);
+    } else {
+      const center = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 16), new THREE.MeshBasicMaterial({ color: 0xffff00 }));
+      obj.add(center);
+      for(let j=0; j<6; j++) {
+        const petal = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 16), new THREE.MeshBasicMaterial({ color: 0xff69b4 }));
+        const angle = (j / 6) * Math.PI * 2;
+        petal.position.set(Math.cos(angle)*0.35, Math.sin(angle)*0.35, 0);
+        obj.add(petal);
+      }
+    }
+    
+    obj.position.set((Math.random()-0.5)*40, -25 - Math.random()*20, (Math.random()-0.5)*20);
+    obj.userData = { speed: 0.1 + Math.random() * 0.2, sway: Math.random() * 0.05, swayOffset: Math.random() * 100 };
+    scene.add(obj);
+    balloons.push(obj);
+  }
+}
+
+function clearBalloons() {
+  balloons.forEach(b => scene.remove(b));
+  balloons = [];
+}
+
+// --- 8. 动画循环 (爱心跳动) ---
+function animate() {
+  requestAnimationFrame(animate);
+  const time = Date.now() * 0.001;
+  const positions = particles.geometry.attributes.position.array;
+  
+  // 1. 爱心自动跳动逻辑
+  if (isConfessionMode && originalHeartPositions) {
+      const start = CONFIG.HEART_PARTICLE_START * 3;
+      const end = CONFIG.HEART_PARTICLE_END * 3;
+      const count = (CONFIG.HEART_PARTICLE_END - CONFIG.HEART_PARTICLE_START) * 3;
+      
+      // 使用三角函数生成脉冲缩放值
+      const pulse = Math.sin(time * CONFIG.HEART_PULSE_SPEED) * 0.5 + 0.5; // [0, 1]
+      const desiredScale = THREE.MathUtils.lerp(CONFIG.HEART_PULSE_MIN, CONFIG.HEART_PULSE_MAX, pulse);
+      
+      // 平滑更新当前缩放因子
+      currentScaleFactor += (desiredScale - currentScaleFactor) * 0.1;
+
+      // 应用缩放
+      for (let i = 0; i < count; i += 3) {
+          targetPositions[start + i] = originalHeartPositions[i] * currentScaleFactor;
+          targetPositions[start + i + 1] = originalHeartPositions[i + 1] * currentScaleFactor;
+      }
+  }
+
+  // 2. 场景旋转平滑过渡
+  currentRotationY += (targetRotationY - currentRotationY) * CONFIG.ROTATION_SMOOTHING;
+  particles.rotation.y = currentRotationY;
+  balloons.forEach(b => b.rotation.y = currentRotationY);
+  
+  const lerpSpeed = 0.12; 
+
+  // 3. 粒子向目标位置移动 (Lerp插值)
+  for (let i = 0; i < CONFIG.particleCount; i++) {
+    const ix = i * 3;
+    const iy = i * 3 + 1;
+    const iz = i * 3 + 2;
+
+    const noiseAmp = isConfessionMode ? 0.03 : 0.01;
+    
+    positions[ix] += (targetPositions[ix] - positions[ix]) * lerpSpeed + (Math.random()-0.5)*noiseAmp;
+    positions[iy] += (targetPositions[iy] - positions[iy]) * lerpSpeed + (Math.random()-0.5)*noiseAmp;
+    positions[iz] += (targetPositions[iz] - positions[iz]) * lerpSpeed + (Math.random()-0.5)*noiseAmp;
+  }
+  
+  particles.geometry.attributes.position.needsUpdate = true;
+  
+  // 4. 气球上升动画
+  if (balloons.length > 0) {
+    balloons.forEach(b => {
+      b.position.y += b.userData.speed;
+      b.position.x += Math.sin(time * 2 + b.userData.swayOffset) * b.userData.sway;
+      b.rotation.z = Math.sin(time + b.userData.swayOffset) * 0.1;
+      if (b.position.y > 25) b.position.y = -25;
+    });
+  }
+
+  renderer.render(scene, camera);
+}
+
+// 启动应用程序
+init();

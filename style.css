@@ -1,0 +1,76 @@
+/* style.css */
+
+/* 全局重置 */
+body {
+    margin: 0;
+    overflow: hidden;
+    background-color: #000;
+    color: #fff;
+    font-family: sans-serif;
+}
+
+/* Three.js canvas 容器 */
+canvas {
+    display: block;
+}
+
+/* 隐藏 MediaPipe 用于输入的 video 元素 */
+#input-video {
+    display: none;
+}
+
+/* 全屏按钮样式 */
+#fs-btn {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 8px 15px;
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+    border: 2px solid #fff;
+    border-radius: 5px;
+    cursor: pointer;
+    z-index: 1000;
+    user-select: none;
+    font-size: 14px;
+    opacity: 0.8;
+    transition: opacity 0.3s;
+}
+
+#fs-btn:hover {
+    opacity: 1;
+}
+
+/* 移动端启动覆盖层样式 */
+#start-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.95);
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+    text-align: center;
+}
+
+#start-btn {
+    padding: 15px 30px;
+    margin-top: 20px;
+    font-size: 18px;
+    background: #ff69b4; /* 爱心粉色 */
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(255, 105, 180, 0.4);
+    transition: background 0.3s;
+}
+
+#start-btn:hover {
+    background: #ff4d9a;
+}

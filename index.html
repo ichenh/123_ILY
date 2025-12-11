@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>动态粒子交互特效 (手势识别)</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div id="start-overlay" style="display: none;">
+        <h2>💖 粒子互动特效 💖</h2>
+        <p>检测到移动设备。点击开始按钮以启用摄像头进行手势互动。</p>
+        <button id="start-btn">
+            点击开始 (请求摄像头权限)
+        </button>
+    </div>
+
+    <div id="fs-btn">Fullscreen</div>
+
+    <video id="input-video" style="display: none;" autoplay playsInline></video>
+
+    <script type="module" src="script.js"></script>
+</body>
+</html>
